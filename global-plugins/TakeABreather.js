@@ -23,11 +23,13 @@
 //
 // Optional: "HP Floor" prevents death from lethal damage. Set to 1 to make
 // the user survive at 1 HP. Set to 0 for normal behavior. Applies only to
-// actors (the party) — enemies are untouched and remain killable. Note
-// the floor covers ALL HP loss for actors while active, not just Breather
-// vulnerability. This is intentional: it's meant to be an always-on
-// anti-death net for the party, not something scoped to the breather
-// mechanic.
+// actors (the party) during battle — enemies are untouched and remain
+// killable, and the floor is automatically suspended whenever the battle
+// was flagged "Can Lose" via the Battle Processing event command, so a
+// scripted defeat still actually kills the party. Applies to all in-battle
+// HP loss for actors while active, not just Breather vulnerability. This
+// is intentional: it's meant to be an always-on anti-death net for normal
+// battles, not something scoped to the breather mechanic.
 //
 // @param Heal Percent
 // @desc Percent of MaxHP healed. 20 = 20%.
@@ -58,7 +60,7 @@
     var COMMAND_NAME       = String(params['Command Name'] || 'Take a Breather');
     var VULN_STATE_ID      = Number(params['Vulnerable State ID'] || 0);
     var STATE_RATE_MULT    = Number(params['State Rate Multiplier'] || 1.5);
-    var HP_FLOOR           = Number(params['HP Floor'] || 1);
+    var HP_FLOOR           = Number(params['HP Floor'] || 0);
 
     //---------------------------------------------------------------------
     // Game_Battler - vulnerability flag
@@ -101,14 +103,24 @@
     //---------------------------------------------------------------------
     // Game_Actor - HP floor (optional non-lethal mode for the PARTY only).
     // Patched on Game_Actor, not Game_Battler, so enemies are unaffected
-    // and remain killable. Applies to all HP loss for actors while active,
-    // not just Breather vulnerability — see @help above.
+    // and remain killable. Only applies during battle, and is suspended
+    // whenever BattleManager.canLose() is true — i.e. the battle was set
+    // up with the "Can Lose" option on the "Battle Processing" event
+    // command, RPG Maker's standard way to script a loss without kicking
+    // to the Game Over screen. That lets a scripted defeat actually kill
+    // the party as intended, instead of everyone bobbing at HP_FLOOR.
+    // Caveat: this only catches losses scripted through that flag. A
+    // death forced via a Common Event's "Change HP" command outside a
+    // Can-Lose battle will still be floored, since there's no generic
+    // signal to detect "this HP=0 is intentional" in that case.
     //---------------------------------------------------------------------
 
     if (HP_FLOOR > 0) {
         var _Game_Actor_setHp = Game_Actor.prototype.setHp;
         Game_Actor.prototype.setHp = function(hp) {
-            var floored = Math.max(hp, HP_FLOOR);
+            var scriptedLoss = $gameParty.inBattle() &&
+                BattleManager.canLose && BattleManager.canLose();
+            var floored = scriptedLoss ? hp : Math.max(hp, HP_FLOOR);
             _Game_Actor_setHp.call(this, floored);
         };
     }
