@@ -57,7 +57,7 @@
     var COMMAND_NAME       = String(params['Command Name'] || 'Take a Breather');
     var VULN_STATE_ID      = Number(params['Vulnerable State ID'] || 0);
     var STATE_RATE_MULT    = Number(params['State Rate Multiplier'] || 1.5);
-    var HP_FLOOR           = Number(params['HP Floor'] || 0);
+    var HP_FLOOR           = Number(params['HP Floor'] || 1);
 
     //---------------------------------------------------------------------
     // Game_Battler - vulnerability flag
