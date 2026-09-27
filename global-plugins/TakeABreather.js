@@ -1,0 +1,188 @@
+//=============================================================================
+// RPG Maker MV - Take a Breather
+//=============================================================================
+// @plugindesc Adds a "Take a Breather" battle command. Heals the user but
+// makes them more susceptible to status effects for the rest of the turn.
+// @author You
+// @help
+// Drop-in plugin. No database edits required.
+//
+// IMPORTANT: Save this file as TakeABreather.js (no spaces) in your
+// js/plugins folder. PluginManager.parameters() looks up parameters by
+// filename, so a mismatched name causes every parameter to silently fall
+// back to its default.
+//
+// Adds a new battle command to every actor: "Take a Breather".
+//   - Heals the user for a % of MaxHP (default 20%).
+//   - Applies a hidden "vulnerable" flag to the user until end of turn.
+//   - While vulnerable, incoming state application rates are multiplied
+//     by a configurable factor (default 1.5x).
+//
+// Optional: point "Vulnerable State ID" at a state in your database if you
+// want a visible icon. Set it to 0 to use the internal flag only.
+//
+// Optional: "HP Floor" prevents death from lethal damage. Set to 1 to make
+// the user survive at 1 HP. Set to 0 for normal behavior. Note this floor
+// applies to ALL HP loss in the game while active (not just Breather
+// vulnerability), since it patches Game_Battler.prototype.setHp globally.
+// This is intentional here: it's meant to be an always-on anti-death net,
+// not something scoped to the breather mechanic.
+//
+// @param Heal Percent
+// @desc Percent of MaxHP healed. 20 = 20%.
+// @default 20
+//
+// @param Command Name
+// @desc Name shown in the actor command window.
+// @default Take a Breather
+//
+// @param Vulnerable State ID
+// @desc Optional state ID to apply for visibility. 0 = use internal flag only.
+// @default 0
+//
+// @param State Rate Multiplier
+// @desc Multiplier applied to incoming state rates while vulnerable. 1.5 = +50%.
+// @default 1.5
+//
+// @param HP Floor
+// @desc Minimum HP the battler is left at when taking lethal damage. 0 = normal.
+// @default 0
+//=============================================================================
+
+(function() {
+    'use strict';
+
+    var params = PluginManager.parameters('TakeABreather');
+    var HEAL_PERCENT       = Number(params['Heal Percent'] || 20);
+    var COMMAND_NAME       = String(params['Command Name'] || 'Take a Breather');
+    var VULN_STATE_ID      = Number(params['Vulnerable State ID'] || 0);
+    var STATE_RATE_MULT    = Number(params['State Rate Multiplier'] || 1.5);
+    var HP_FLOOR           = Number(params['HP Floor'] || 0);
+
+    //---------------------------------------------------------------------
+    // Game_Battler - vulnerability flag
+    //---------------------------------------------------------------------
+
+    var _Game_Battler_initMembers = Game_Battler.prototype.initMembers;
+    Game_Battler.prototype.initMembers = function() {
+        _Game_Battler_initMembers.call(this);
+        this._breatherVulnerable = false;
+    };
+
+    Game_Battler.prototype.setBreatherVulnerable = function(value) {
+        this._breatherVulnerable = !!value;
+        if (VULN_STATE_ID > 0) {
+            if (value) {
+                this.addState(VULN_STATE_ID);
+            } else {
+                this.removeState(VULN_STATE_ID);
+            }
+        }
+    };
+
+    Game_Battler.prototype.isBreatherVulnerable = function() {
+        return !!this._breatherVulnerable;
+    };
+
+    //---------------------------------------------------------------------
+    // Game_Battler - stateRate multiplier while vulnerable
+    //---------------------------------------------------------------------
+
+    var _Game_Battler_stateRate = Game_Battler.prototype.stateRate;
+    Game_Battler.prototype.stateRate = function(stateId) {
+        var rate = _Game_Battler_stateRate.call(this, stateId);
+        if (this.isBreatherVulnerable()) {
+            rate *= STATE_RATE_MULT;
+        }
+        return rate;
+    };
+
+    //---------------------------------------------------------------------
+    // Game_Battler - HP floor (optional non-lethal mode, applies globally
+    // while HP_FLOOR > 0 — see @help above)
+    //---------------------------------------------------------------------
+
+    if (HP_FLOOR > 0) {
+        var _Game_Battler_setHp = Game_Battler.prototype.setHp;
+        Game_Battler.prototype.setHp = function(hp) {
+            var floored = Math.max(hp, HP_FLOOR);
+            _Game_Battler_setHp.call(this, floored);
+        };
+    }
+
+    //---------------------------------------------------------------------
+    // Game_Actor - breather action
+    //---------------------------------------------------------------------
+
+    Game_Actor.prototype.performBreather = function() {
+        var heal = Math.floor(this.mhp * HEAL_PERCENT / 100);
+        this.gainHp(heal);
+        this.startDamagePopup && this.startDamagePopup();
+        this.setBreatherVulnerable(true);
+    };
+
+    //---------------------------------------------------------------------
+    // Window_ActorCommand - add the command
+    //---------------------------------------------------------------------
+
+    var _Window_ActorCommand_makeCommandList = Window_ActorCommand.prototype.makeCommandList;
+    Window_ActorCommand.prototype.makeCommandList = function() {
+        _Window_ActorCommand_makeCommandList.call(this);
+        if (this._actor) {
+            this.addCommand(COMMAND_NAME, 'breather', this._actor.canMove());
+        }
+    };
+
+    //---------------------------------------------------------------------
+    // Scene_Battle - handle command selection and execution
+    //---------------------------------------------------------------------
+
+    var _Scene_Battle_createActorCommandWindow = Scene_Battle.prototype.createActorCommandWindow;
+    Scene_Battle.prototype.createActorCommandWindow = function() {
+        _Scene_Battle_createActorCommandWindow.call(this);
+        this._actorCommandWindow.setHandler('breather', this.commandBreather.bind(this));
+    };
+
+    Scene_Battle.prototype.commandBreather = function() {
+        var actor = BattleManager.actor();
+        if (actor) {
+            actor.performBreather();
+        }
+        // selectNextCommand (not endCommandSelection) advances to the next
+        // actor's command input if the party has more members to queue,
+        // or proceeds to action execution only once everyone has chosen.
+        // endCommandSelection would skip straight to execution and leave
+        // any later actors without a queued action.
+        this.selectNextCommand();
+    };
+
+    //---------------------------------------------------------------------
+    // Cleanup - clear the flag at end of turn and end of battle
+    //---------------------------------------------------------------------
+
+    var _BattleManager_endTurn = BattleManager.endTurn;
+    BattleManager.endTurn = function() {
+        _BattleManager_endTurn.call(this);
+        this.clearBreatherFlags();
+    };
+
+    var _BattleManager_endBattle = BattleManager.endBattle;
+    BattleManager.endBattle = function(result) {
+        this.clearBreatherFlags();
+        _BattleManager_endBattle.call(this, result);
+    };
+
+    BattleManager.clearBreatherFlags = function() {
+        if ($gameParty && $gameParty.members) {
+            $gameParty.members().forEach(function(actor) {
+                actor.setBreatherVulnerable(false);
+            });
+        }
+        if ($gameTroop && $gameTroop.members) {
+            $gameTroop.members().forEach(function(enemy) {
+                enemy.setBreatherVulnerable(false);
+            });
+        }
+    };
+
+})();
