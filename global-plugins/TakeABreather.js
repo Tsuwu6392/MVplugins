@@ -22,11 +22,12 @@
 // want a visible icon. Set it to 0 to use the internal flag only.
 //
 // Optional: "HP Floor" prevents death from lethal damage. Set to 1 to make
-// the user survive at 1 HP. Set to 0 for normal behavior. Note this floor
-// applies to ALL HP loss in the game while active (not just Breather
-// vulnerability), since it patches Game_Battler.prototype.setHp globally.
-// This is intentional here: it's meant to be an always-on anti-death net,
-// not something scoped to the breather mechanic.
+// the user survive at 1 HP. Set to 0 for normal behavior. Applies only to
+// actors (the party) — enemies are untouched and remain killable. Note
+// the floor covers ALL HP loss for actors while active, not just Breather
+// vulnerability. This is intentional: it's meant to be an always-on
+// anti-death net for the party, not something scoped to the breather
+// mechanic.
 //
 // @param Heal Percent
 // @desc Percent of MaxHP healed. 20 = 20%.
@@ -53,7 +54,7 @@
     'use strict';
 
     var params = PluginManager.parameters('TakeABreather');
-    var HEAL_PERCENT       = Number(params['Heal Percent'] || 50);
+    var HEAL_PERCENT       = Number(params['Heal Percent'] || 20);
     var COMMAND_NAME       = String(params['Command Name'] || 'Take a Breather');
     var VULN_STATE_ID      = Number(params['Vulnerable State ID'] || 0);
     var STATE_RATE_MULT    = Number(params['State Rate Multiplier'] || 1.5);
@@ -98,15 +99,17 @@
     };
 
     //---------------------------------------------------------------------
-    // Game_Battler - HP floor (optional non-lethal mode, applies globally
-    // while HP_FLOOR > 0 — see @help above)
+    // Game_Actor - HP floor (optional non-lethal mode for the PARTY only).
+    // Patched on Game_Actor, not Game_Battler, so enemies are unaffected
+    // and remain killable. Applies to all HP loss for actors while active,
+    // not just Breather vulnerability — see @help above.
     //---------------------------------------------------------------------
 
     if (HP_FLOOR > 0) {
-        var _Game_Battler_setHp = Game_Battler.prototype.setHp;
-        Game_Battler.prototype.setHp = function(hp) {
+        var _Game_Actor_setHp = Game_Actor.prototype.setHp;
+        Game_Actor.prototype.setHp = function(hp) {
             var floored = Math.max(hp, HP_FLOOR);
-            _Game_Battler_setHp.call(this, floored);
+            _Game_Actor_setHp.call(this, floored);
         };
     }
 
