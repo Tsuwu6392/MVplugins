@@ -48,8 +48,8 @@
  * @param rules
  * @text Rules
  * @type string
- * @default 10, Sub, 0; 6, Add, 99
- * @desc "VALUE_ID, OPERATION, VALUE" rules separated by ";". Omit VALUE to block the operation instead.
+ * @default
+ * @desc "VALUE_ID, OPERATION, VALUE" rules separated by ";". Omit VALUE to block the operation instead. Empty = no rules.
  *
  * @param logBlocked
  * @text Log Clamped/Blocked Commands
