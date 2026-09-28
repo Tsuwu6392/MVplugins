@@ -1,6 +1,6 @@
 /*:
  * @target MZ
- * @plugindesc (MV/MZ) Blocks selected Control Variable operations for selected variable IDs.
+ * @plugindesc (MV/MZ) Clamps selected Control Variable operations at a threshold.
  * @author you
  * @help
  * Works in both RPG Maker MV and MZ.
@@ -10,45 +10,52 @@
  * Game_Interpreter.prototype.command122 (Control Variables), so this
  * plugin wraps the final version.
  *
- * Each rule is: "varId:op1|op2|..."
- *   ops: Set, Add, Sub, Mul, Div, Mod  (or raw numbers 0..5)
- *   Separate multiple ops on the SAME variable with "|" or a space -
- *   NOT a comma. Commas separate different rules from each other.
+ * Each rule is: VALUE_ID, OPERATION, VALUE
+ *   VALUE_ID   the variable ID
+ *   OPERATION  Set, Add, Sub, Mul, Div, Mod (or raw numbers 0..5).
+ *              Combine several with "|" (e.g. Add|Sub). Leave empty for ALL.
+ *   VALUE      the threshold (optional, see below)
  *
- * Example: "6:Add, 10:Sub"
- *   -> ignores every "Variable 6 +=" and "Variable 10 -="
+ * Separate rules from each other with ";" (or a new line).
  *
- * Example: "6:Add|Sub, 10:Mul Div"
- *   -> ignores "Variable 6 +=" AND "Variable 6 -=", plus
- *      "Variable 10 *=" AND "Variable 10 /="
+ * HOW THE THRESHOLD WORKS
+ *   The threshold is applied in the direction the command moved the variable:
+ *   - If the operation DECREASED the variable and the result is
+ *     equal to or below VALUE, the variable is set back to VALUE.
+ *   - If the operation INCREASED the variable and the result is
+ *     equal to or above VALUE, the variable is set back to VALUE.
  *
- * Leave a rule's op list empty to block ALL operations on that variable:
- *   "10:"
+ *   So for Sub, VALUE acts as a floor. For Add, VALUE acts as a ceiling.
  *
- * KNOWN LIMITATION - ranged Control Variables commands:
- *   The event command "Control Variables" can target a RANGE of variable
- *   IDs at once (e.g. variables 8 through 12) rather than a single ID.
- *   This plugin can only block a command outright when it targets exactly
- *   ONE variable. If a ranged command's span includes a blocked variable
- *   ALONGSIDE other, non-blocked variables, the plugin cannot safely
- *   block just the one ID without also stopping the other variables in
- *   that range from updating - so the whole command is allowed to run,
- *   and the blocked variable will still change. Blocking is only
- *   guaranteed when the offending command targets a single variable
- *   (start ID == end ID), which is what the normal editor UI produces
- *   when you pick one specific variable rather than a range.
+ * Examples:
+ *   "10, Sub, 0"
+ *   -> Variable 10 can never be reduced by Sub to 0 or below; it is set to 0.
+ *
+ *   "10, Sub, 0; 6, Add, 99"
+ *   -> Variable 10 floors at 0 on Sub, variable 6 caps at 99 on Add.
+ *
+ * Leave VALUE out entirely to BLOCK the operation instead of clamping it
+ * (the variable is restored to what it was before the command ran):
+ *   "6, Add"     or     "10, Sub|Mul,"
+ *
+ * Ranged Control Variables commands (e.g. variables 8 through 12) are
+ * handled per variable, so only the ruled variable is clamped/restored
+ * and the others in the range update normally.
+ *
+ * Note: only the Control Variables event command is filtered. Script calls
+ * such as $gameVariables.setValue() are not affected.
  *
  * @param rules
  * @text Rules
  * @type string
- * @default 6:Add, 10:Sub
- * @desc Comma-separated list like "6:Add, 10:Sub". Use "|" to combine ops on one var, e.g. "6:Add|Sub". Empty op list blocks all ops.
+ * @default 10, Sub, 0; 6, Add, 99
+ * @desc "VALUE_ID, OPERATION, VALUE" rules separated by ";". Omit VALUE to block the operation instead.
  *
  * @param logBlocked
- * @text Log Blocked Commands
+ * @text Log Clamped/Blocked Commands
  * @type boolean
  * @default false
- * @desc If true, prints a console line each time a command is blocked.
+ * @desc If true, prints a console line each time a rule fires.
  */
 
 (() => {
@@ -61,34 +68,46 @@
     const parseOp = (s) => {
         s = String(s).trim();
         if (Object.prototype.hasOwnProperty.call(OP, s)) return OP[s];
+        if (s === "") return null;
         const n = Number(s);
         return Number.isFinite(n) ? n : null;
     };
 
     // ---- Rule parsing ------------------------------------------------------
-    /** @type {Map<number, Set<number>|null>} varId -> blocked op set (null = all ops) */
-    const BLOCKED = new Map();
+    /** @type {{id:number, ops:Set<number>|null, limit:number|null}[]} */
+    const RULES = [];
 
-    for (const rule of raw.split(",")) {
-        const [idPart, opPartRaw] = rule.split(":");
-        const id = Number((idPart || "").trim());
-        if (!Number.isFinite(id)) continue;
+    for (const rule of raw.split(/[;\n]+/)) {
+        if (rule.trim() === "") continue;
+        const parts = rule.split(",").map((s) => s.trim());
 
-        const opPart = (opPartRaw || "").trim();
-        if (opPart === "") {
-            BLOCKED.set(id, null);
-        } else {
-            const set = new Set();
-            for (const name of opPart.split(/[|+\s]+/).filter(Boolean)) {
+        const id = Number(parts[0]);
+        if (parts[0] === "" || !Number.isFinite(id)) continue;
+
+        // Operation(s): empty = all operations.
+        let ops = null;
+        if (parts[1]) {
+            ops = new Set();
+            for (const name of parts[1].split(/[|+\s]+/).filter(Boolean)) {
                 const code = parseOp(name);
-                if (code !== null) set.add(code);
+                if (code !== null) ops.add(code);
             }
-            BLOCKED.set(id, set);
+            if (ops.size === 0) continue; // nothing valid was given
         }
+
+        // Threshold: empty/missing = block instead of clamp.
+        let limit = null;
+        if (parts[2] !== undefined && parts[2] !== "") {
+            const n = Number(parts[2]);
+            if (!Number.isFinite(n)) continue;
+            limit = n;
+        }
+
+        RULES.push({ id, ops, limit });
     }
 
     console.log(`[${PLUGIN}] rules =`, raw,
-        "parsed =", [...BLOCKED.entries()].map(([v, s]) => [v, s === null ? "ALL" : [...s]]));
+        "parsed =", RULES.map((r) => [r.id, r.ops === null ? "ALL" : [...r.ops], r.limit]));
 
     // ---- Hook ---------------------------------------------------------------
     const _command122 = Game_Interpreter.prototype.command122;
@@ -99,19 +118,35 @@
         const endId   = p[1];
         const op      = p[2];
 
-        for (const [varId, ops] of BLOCKED) {
-            if (startId <= varId && varId <= endId) {
-                if (ops === null || ops.has(op)) {
-                    if (LOG) {
-                        console.log(`[${PLUGIN}] blocked range ${startId}..${endId} op=${op} (target var ${varId})`);
-                    }
-                    // Only consume when the command affects exactly one variable.
-                    // Multi-var ranges fall through so the other vars still update
-                    // (see "KNOWN LIMITATION" in @help).
-                    if (startId === endId) return true;
-                }
+        // Rules that apply to this command, plus each variable's value beforehand.
+        const active = RULES.filter((r) =>
+            startId <= r.id && r.id <= endId && (r.ops === null || r.ops.has(op)));
+        if (active.length === 0) return _command122.call(this, params);
+
+        const before = new Map();
+        for (const r of active) {
+            if (!before.has(r.id)) before.set(r.id, $gameVariables.value(r.id));
+        }
+
+        const result = _command122.call(this, params);
+
+        for (const r of active) {
+            const old = before.get(r.id);
+            const now = $gameVariables.value(r.id);
+            if (now === old) continue;
+
+            if (r.limit === null) {
+                // Block: put it back exactly as it was.
+                $gameVariables.setValue(r.id, old);
+                if (LOG) console.log(`[${PLUGIN}] blocked var ${r.id} op=${op}: ${now} -> ${old}`);
+            } else if (
+                (now < old && now <= r.limit) ||   // decreased to/below threshold
+                (now > old && now >= r.limit)      // increased to/above threshold
+            ) {
+                $gameVariables.setValue(r.id, r.limit);
+                if (LOG) console.log(`[${PLUGIN}] clamped var ${r.id} op=${op}: ${now} -> ${r.limit}`);
             }
         }
-        return _command122.call(this, params);
+        return result;
     };
 })();
