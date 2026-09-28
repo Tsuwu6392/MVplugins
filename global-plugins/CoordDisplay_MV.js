@@ -85,10 +85,11 @@
  * parameter). X and Y decimal precision are configurable separately (player
  * position is fractional while moving).
  *
- * While a message window is open, the display shifts to the middle of
- * the same side (left stays left, right/center becomes right) so it
- * never overlaps the message box, then returns to its normal position
- * once the message closes.
+ * The display sits in the bottom layer of the window layer, so every
+ * other window (message, choices, map name, etc.) draws on top of it.
+ * MV's WindowLayer cuts out lower windows wherever a higher window
+ * covers them, so the coords are cleanly hidden under overlapping windows
+ * and reappear when those close. The display never moves.
  *
  * No plugin commands. Just add to the plugin list and turn it on.
  */
@@ -121,14 +122,6 @@
 
     function getLayout() {
         return POSITION_LAYOUT[position] || POSITION_LAYOUT.topRight;
-    }
-
-    // Same horizontal side as the configured position, but vertically
-    // centered - used while a message window is open so the two never
-    // overlap. Center-anchored positions fall back to the right side.
-    function getMessageLayout() {
-        var base = getLayout();
-        return base.h === "left" ? POSITION_LAYOUT.middleLeft : POSITION_LAYOUT.middleRight;
     }
 
     function computeRect(width, height, layout) {
@@ -173,8 +166,6 @@
         this._width = width;
         this._height = height;
         this._normalLayout = layout;
-        this._messageLayout = getMessageLayout();
-        this._messageActive = false;
         this._lastX = null;
         this._lastY = null;
         this._lastMap = null;
@@ -205,7 +196,7 @@
         var x = $gamePlayer.x.toFixed(xDecimals);
         var y = $gamePlayer.y.toFixed(yDecimals);
         var text = mapId + " - " + x + ";" + y;
-        var align = (this._messageActive ? this._messageLayout : this._normalLayout).align;
+        var align = this._normalLayout.align;
         var width = this.contents.width;
 
         // Shadow pass first (offset by 1px), then the main text on top.
@@ -219,15 +210,6 @@
 
     Window_CoordDisplay.prototype.update = function () {
         Window_Base.prototype.update.call(this);
-
-        var busy = $gameMessage.isBusy();
-        if (busy !== this._messageActive) {
-            this._messageActive = busy;
-            var layout = busy ? this._messageLayout : this._normalLayout;
-            var rect = computeRect(this._width, this._height, layout);
-            this.move(rect.x, rect.y, rect.width, rect.height);
-            this.refresh();
-        }
 
         var curX = $gamePlayer.x.toFixed(xDecimals);
         var curY = $gamePlayer.y.toFixed(yDecimals);
@@ -245,6 +227,8 @@
     Scene_Map.prototype.createAllWindows = function () {
         _Scene_Map_createAllWindows.call(this);
         this._coordDisplayWindow = new Window_CoordDisplay();
-        this.addWindow(this._coordDisplayWindow);
+        // Insert at the bottom of the window layer (index 0) instead of
+        // addWindow() (top), so all other windows draw over this one.
+        this._windowLayer.addChildAt(this._coordDisplayWindow, 0);
     };
 })();
