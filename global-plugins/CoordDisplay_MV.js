@@ -36,7 +36,7 @@
  * @type number
  * @min 0
  * @max 3
- * @default 1
+ * @default 0
  *
  * @param yDecimals
  * @text Y Decimals
