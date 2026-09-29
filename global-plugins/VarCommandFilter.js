@@ -38,18 +38,50 @@
  * (the variable is restored to what it was before the command ran):
  *   "6, Add"     or     "10, Sub|Mul,"
  *
+ * FLIP
+ *   Write Flip as the VALUE to mirror the change instead of blocking it:
+ *   the variable or stat moves by the same amount in the opposite direction.
+ *   "10, Sub, Flip"   -> a Sub that lowers variable 10 by 3 raises it by 3.
+ *   "TP, Sub, Flip"   -> a -5 TP change becomes +5.
+ *   Flip works on the change that actually happened (old vs. new value), so
+ *   with Set/Mul/Div/Mod it mirrors the resulting difference. HP/MP/TP stay
+ *   within their normal range. An empty operation flips both directions,
+ *   which inverts every change, so usually name Sub or Add.
+ *
  * Ranged Control Variables commands (e.g. variables 8 through 12) are
  * handled per variable, so only the ruled variable is clamped/restored
  * and the others in the range update normally.
  *
- * Note: only the Control Variables event command is filtered. Script calls
- * such as $gameVariables.setValue() are not affected.
+ * Note: variable rules only filter the Control Variables event command.
+ * Script calls such as $gameVariables.setValue() are not affected.
+ *
+ * HP / MP / TP RULES
+ *   Use HP, MP or TP in place of a variable ID to guard the stat itself.
+ *   Format: STAT, OPERATION, VALUE, WHO
+ *   OPERATION  Sub = decreases, Add = increases. Empty = both.
+ *              (Set/Mul/Div/Mod can't be told apart at this level.)
+ *   VALUE      same threshold rule as above. Omit it to BLOCK the change.
+ *   WHO        optional. Empty = all actors, an actor ID = that actor only,
+ *              Enemies = enemies only, All = actors and enemies.
+ *
+ *   These act on the stat, so they catch Change HP/MP/TP commands, skill
+ *   costs, damage, drain effects and plugin changes. A variable that mirrors
+ *   the stat (e.g. via a Script operand) follows it automatically, so it
+ *   needs no rule of its own.
+ *
+ *   Examples:
+ *   "TP, Sub"          -> actors' TP can never decrease.
+ *   "MP, Sub, 5"       -> a drop to 5 MP or below sets MP to 5.
+ *   "HP, Sub, 1, 1"    -> actor 1 can't be reduced below 1 HP.
+ *   "TP, Sub, , 2"     -> only actor 2's TP is protected.
+ *
+ *   Not covered: instant-death states set HP to 0 directly.
  *
  * @param rules
  * @text Rules
  * @type string
  * @default
- * @desc "VALUE_ID, OPERATION, VALUE" rules separated by ";". Omit VALUE to block the operation instead. Empty = no rules.
+ * @desc "VALUE_ID, OPERATION, VALUE" rules separated by ";". Use HP/MP/TP as the ID for stat rules ("TP, Sub"). Omit VALUE to block. Empty = no rules.
  *
  * @param logBlocked
  * @text Log Clamped/Blocked Commands
@@ -76,13 +108,16 @@
     // ---- Rule parsing ------------------------------------------------------
     /** @type {{id:number, ops:Set<number>|null, limit:number|null}[]} */
     const RULES = [];
+    /** @type {{stat:string, dir:string|null, limit:number|null, who:string|number}[]} */
+    const STAT_RULES = [];
 
     for (const rule of raw.split(/[;\n]+/)) {
         if (rule.trim() === "") continue;
         const parts = rule.split(",").map((s) => s.trim());
 
-        const id = Number(parts[0]);
-        if (parts[0] === "" || !Number.isFinite(id)) continue;
+        const stat = /^(hp|mp|tp)$/i.test(parts[0]) ? parts[0].toLowerCase() : null;
+        const id = stat ? 0 : Number(parts[0]);
+        if (!stat && (parts[0] === "" || !Number.isFinite(id))) continue;
 
         // Operation(s): empty = all operations.
         let ops = null;
@@ -95,19 +130,40 @@
             if (ops.size === 0) continue; // nothing valid was given
         }
 
+        // Stat rules only know the direction of change: Sub = down, Add = up.
+        let dir = null;
+        if (stat && ops) {
+            const dec = ops.has(2), inc = ops.has(1);
+            if (!dec && !inc) continue;
+            dir = dec && inc ? null : (dec ? "dec" : "inc");
+        }
+
         // Threshold: empty/missing = block instead of clamp.
-        let limit = null;
-        if (parts[2] !== undefined && parts[2] !== "") {
+        let limit = null, flip = false;
+        if (/^flip$/i.test(parts[2] || "")) {
+            flip = true;
+        } else if (parts[2] !== undefined && parts[2] !== "") {
             const n = Number(parts[2]);
             if (!Number.isFinite(n)) continue;
             limit = n;
         }
 
-        RULES.push({ id, ops, limit });
+        if (stat) {
+            let who = "actors";
+            if (parts[3]) {
+                const w = parts[3].toLowerCase();
+                if (w === "all" || w === "enemies") who = w;
+                else if (Number.isFinite(Number(w))) who = Number(w);
+                else continue;
+            }
+            STAT_RULES.push({ stat, dir, limit, flip, who });
+        } else {
+            RULES.push({ id, ops, limit, flip });
+        }
     }
 
     console.log(`[${PLUGIN}] rules =`, raw,
-        "parsed =", RULES.map((r) => [r.id, r.ops === null ? "ALL" : [...r.ops], r.limit]));
+        "parsed =", RULES.map((r) => [r.id, r.ops === null ? "ALL" : [...r.ops], r.flip ? "FLIP" : r.limit]));
 
     // ---- Hook ---------------------------------------------------------------
     const _command122 = Game_Interpreter.prototype.command122;
@@ -135,7 +191,14 @@
             const now = $gameVariables.value(r.id);
             if (now === old) continue;
 
-            if (r.limit === null) {
+            if (r.flip) {
+                // Flip: mirror the change around the old value.
+                if (typeof old === "number" && typeof now === "number") {
+                    const flipped = old - (now - old);
+                    $gameVariables.setValue(r.id, flipped);
+                    if (LOG) console.log(`[${PLUGIN}] flipped var ${r.id} op=${op}: ${now} -> ${flipped}`);
+                }
+            } else if (r.limit === null) {
                 // Block: put it back exactly as it was.
                 $gameVariables.setValue(r.id, old);
                 if (LOG) console.log(`[${PLUGIN}] blocked var ${r.id} op=${op}: ${now} -> ${old}`);
@@ -149,4 +212,55 @@
         }
         return result;
     };
+
+    // ---- HP / MP / TP hooks -------------------------------------------------
+    const FIELDS  = { hp: "_hp",   mp: "_mp",   tp: "_tp" };
+    const SETTERS = { hp: "setHp", mp: "setMp", tp: "setTp" };
+
+    const appliesTo = (r, b) => {
+        if (r.who === "all") return true;
+        if (r.who === "enemies") return b.isEnemy();
+        if (!b.isActor()) return false;
+        return r.who === "actors" || b.actorId() === r.who;
+    };
+
+    // Returns the value the stat should end up with once the rules are applied.
+    const guard = (b, stat, old, next) => {
+        for (const r of STAT_RULES) {
+            if (r.stat !== stat || next === old || !appliesTo(r, b)) continue;
+            const dec = next < old;
+            if (r.dir === "dec" && !dec) continue;
+            if (r.dir === "inc" && dec) continue;
+            let out = next;
+            if (r.flip) out = old - (next - old);
+            else if (r.limit === null) out = old;
+            else if ((dec && next <= r.limit) || (!dec && next >= r.limit)) out = r.limit;
+            if (out !== next) {
+                if (LOG) console.log(`[${PLUGIN}] ${stat.toUpperCase()} ${old} -> ${next} changed to ${out}`);
+                next = out;
+            }
+        }
+        return next;
+    };
+
+    if (STAT_RULES.length > 0) {
+        // setHp/setMp/setTp cover Change HP/MP/TP, damage, drain and gain effects.
+        for (const stat of Object.keys(FIELDS)) {
+            if (!STAT_RULES.some((r) => r.stat === stat)) continue;
+            const field = FIELDS[stat];
+            const _set = Game_BattlerBase.prototype[SETTERS[stat]];
+            Game_BattlerBase.prototype[SETTERS[stat]] = function(value) {
+                return _set.call(this, guard(this, stat, this[field], value));
+            };
+        }
+
+        // Skill costs subtract _mp/_tp directly, bypassing the setters.
+        const _pay = Game_BattlerBase.prototype.paySkillCost;
+        Game_BattlerBase.prototype.paySkillCost = function(skill) {
+            const oldMp = this._mp, oldTp = this._tp;
+            _pay.call(this, skill);
+            this._mp = guard(this, "mp", oldMp, this._mp).clamp(0, this.mmp);
+            this._tp = guard(this, "tp", oldTp, this._tp).clamp(0, this.maxTp());
+        };
+    }
 })();

@@ -97,9 +97,16 @@ function listProfilesForGui() {
 // CLI args / paths
 // ---------------------------------------------------------------------------
 
+// A blank or whitespace-only CLI arg counts as "not given", so a wrapper script
+// passing "" can't silently fall through to the saved profile by accident.
+function cliArg(i) {
+  const v = process.argv[i];
+  return v && v.trim() ? v.trim() : null;
+}
+
 let port = parseInt(process.argv[5], 10) || 8420;
 
-const initialGameRoot = path.resolve(process.argv[2] || path.join(os.homedir(), 'Downloads'));
+const initialGameRoot = path.resolve(cliArg(2) || path.join(os.homedir(), 'Downloads'));
 const existingProfile = loadProfiles()[initialGameRoot];
 
 // `state` holds the active paths. Unlike the old top-level consts, these can
@@ -109,10 +116,10 @@ const existingProfile = loadProfiles()[initialGameRoot];
 const state = {
   gameRoot: initialGameRoot,
   globPluginsDir: path.resolve(
-    process.argv[3] || (existingProfile && existingProfile.globPluginsDir) || path.join(__dirname, 'global-plugins')
+    cliArg(3) || (existingProfile && existingProfile.globPluginsDir) || path.join(__dirname, 'global-plugins')
   ),
   specificPluginsDir: path.resolve(
-    process.argv[4] ||
+    cliArg(4) ||
       (existingProfile && existingProfile.specificPluginsDir) ||
       path.join(__dirname, 'game-plugins', path.basename(initialGameRoot))
   ),
@@ -850,10 +857,21 @@ document.getElementById('browseCancel').addEventListener('click', () => {
 });
 
 document.getElementById('browseSelect').addEventListener('click', () => {
-  if (browseTargetInputId && browsePath) {
-    document.getElementById(browseTargetInputId).value = browsePath;
-  }
+  const targetId = browseTargetInputId;
   browseModal.style.display = 'none';
+  if (!targetId || !browsePath) return;
+  document.getElementById(targetId).value = browsePath;
+  // Picking a different game root pulls in that game's saved folders (if any).
+  if (targetId === 'gameRootInput') {
+    const known = KNOWN_PROFILES.find((p) => p.gameRoot === browsePath);
+    if (known) {
+      document.getElementById('globPluginsInput').value = known.globPluginsDir;
+      document.getElementById('specificPluginsInput').value = known.specificPluginsDir;
+    }
+  }
+  // Apply right away: previously the pick only filled the text box, and a
+  // reload before pressing Apply re-rendered the old saved paths.
+  document.getElementById('applyPathsBtn').click();
 });
 
 // ---------------------------------------------------------------------------
@@ -939,9 +957,17 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/set-paths') {
       const bodyText = await readBody(req);
       const body = JSON.parse(bodyText || '{}');
-      const newGameRoot = path.resolve(body.gameRoot || state.gameRoot);
-      const newGlobPluginsDir = path.resolve(body.globPluginsDir || state.globPluginsDir);
-      const newSpecificPluginsDir = path.resolve(body.specificPluginsDir || state.specificPluginsDir);
+      // The values sent from the GUI are authoritative. A blank field is an
+      // error, not a silent fallback to the previous (or saved-profile) value.
+      for (const key of ['gameRoot', 'globPluginsDir', 'specificPluginsDir']) {
+        if (!body[key] || !String(body[key]).trim()) {
+          sendJson(res, 400, { ok: false, error: `${key} is empty` });
+          return;
+        }
+      }
+      const newGameRoot = path.resolve(String(body.gameRoot).trim());
+      const newGlobPluginsDir = path.resolve(String(body.globPluginsDir).trim());
+      const newSpecificPluginsDir = path.resolve(String(body.specificPluginsDir).trim());
       const check = validatePaths(newGameRoot, newGlobPluginsDir, newSpecificPluginsDir);
       if (!check.ok) {
         sendJson(res, 400, { ok: false, error: check.error });
